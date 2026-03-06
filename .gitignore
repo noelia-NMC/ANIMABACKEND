@@ -1,33 +1,62 @@
-# dependencias
+# DEPENDENCIAS
 node_modules/
 
-# variables sensibles
+# VARIABLES DE ENTORNO
 .env
 .env.local
 .env.development
 .env.production
+.env.test
 
-# logs
+# CREDENCIALES / SECRETOS
+firebase-service-account.json
+serviceAccountKey.json
+credentials.json
+*.pem
+*.key
+
+# LOGS
 logs
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# sistema
-.DS_Store
-Thumbs.db
-
-# editor
-.vscode/
-
-# build
+# BUILD / DIST
 dist/
 build/
 
-# archivos temporales
+# COVERAGE
+coverage/
+
+# CACHE
+.cache
+.tmp
+.temp
+
+# SISTEMA OPERATIVO
+.DS_Store
+Thumbs.db
+
+# EDITORES
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# TEST
+jest.config.js
+jest.setup.js
+
+# ARCHIVOS LOCALES
+uploads/
 tmp/
 temp/
 
-# coverage
-coverage/
+# BASES DE DATOS LOCALES
+*.sqlite
+*.db
+
+# ARCHIVOS DE DEPLOY
+.vercel
+.netlify

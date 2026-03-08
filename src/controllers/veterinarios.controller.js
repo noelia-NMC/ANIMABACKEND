@@ -1,4 +1,4 @@
-// Backend/src/controllers/veterinarios.controller.js (web) ✅ COMPLETO + ROLES POR CLÍNICA
+// Backend/src/controllers/veterinarios.controller.js
 const pool = require('../db');
 const bcrypt = require('bcrypt');
 const { registrarAuditoria } = require('../utils/auditoria');
@@ -11,11 +11,14 @@ function normEmail(email) {
 
 // Trae rol_id por nombre (fallback si frontend manda string)
 async function getRolIdByNombre(nombreRol) {
-  const r = await pool.query(`SELECT id FROM public.roles WHERE lower(nombre) = lower($1) LIMIT 1`, [nombreRol]);
+  const r = await pool.query(
+    `SELECT id FROM public.roles WHERE lower(nombre) = lower($1) LIMIT 1`,
+    [nombreRol]
+  );
   return r.rows?.[0]?.id ?? null;
 }
 
-// ✅ helper: valida que el rol sea asignable en esta clínica (o global)
+// valida que el rol sea asignable en esta clínica (o global)
 async function validarRolAsignable(client, rolId, clinicaId) {
   const rolDB = await client.query(
     `SELECT id, nombre, clinica_id
@@ -32,12 +35,10 @@ async function validarRolAsignable(client, rolId, clinicaId) {
   const rolRow = rolDB.rows[0];
   const rolNombre = String(rolRow.nombre || '').toLowerCase();
 
-  // dueño bloqueado
   if (rolNombre === 'dueño' || rolNombre === 'dueno') {
     return { ok: false, status: 400, error: 'El rol dueño es exclusivo de móvil.' };
   }
 
-  // ✅ rol debe ser global o de mi clínica
   if (rolRow.clinica_id !== null && Number(rolRow.clinica_id) !== Number(clinicaId)) {
     return { ok: false, status: 403, error: 'No puedes asignar roles de otra clínica.' };
   }
@@ -45,9 +46,17 @@ async function validarRolAsignable(client, rolId, clinicaId) {
   return { ok: true, rol: rolRow, rolNombre };
 }
 
+/**
+ * Decide si un rol puede aparecer en turnos
+ * Ajusta esta lista según tus nombres reales de rol
+ */
+function esRolValidoParaTurno(nombreRol) {
+  const n = String(nombreRol || '').trim().toLowerCase();
+  return ['veterinario', 'veterinaria'].includes(n);
+}
+
 // ===================================================================
-// GET /veterinarios  (lista USUARIOS de la clínica)
-// Lee desde users (fuente real) y junta datos de veterinarios (perfil)
+// GET /veterinarios  -> lista general de usuarios de la clínica
 // ===================================================================
 const getVeterinarios = async (req, res) => {
   const clinicaId = getClinicaId(req);
@@ -59,6 +68,7 @@ const getVeterinarios = async (req, res) => {
         u.id,
         u.nombre,
         u.apellido,
+        v.id AS veterinario_id,
         v.especialidad,
         u.telefono,
         u.email,
@@ -70,11 +80,11 @@ const getVeterinarios = async (req, res) => {
       LEFT JOIN public.veterinarios v
         ON v.email = u.email AND v.clinica_id = u.clinica_id
       WHERE u.clinica_id = $1
-        AND LOWER(r.nombre) NOT IN ('dueño','dueno')
+        AND LOWER(r.nombre) NOT IN ('dueño', 'dueno')
       ORDER BY u.nombre ASC
     `;
     const result = await pool.query(q, [clinicaId]);
-    res.json(result.rows);
+    return res.json(result.rows);
   } catch (err) {
     await registrarAuditoria(req, {
       modulo: 'USUARIOS',
@@ -84,13 +94,54 @@ const getVeterinarios = async (req, res) => {
       descripcion: 'Error obteniendo usuarios',
       metadata: { clinica_id: clinicaId, error: err.message },
     });
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message });
   }
 };
 
 // ===================================================================
-// POST /veterinarios  (crea USUARIO con rol dinámico)
-// Acepta rol_id (recomendado). Soporta rol (string) solo por fallback.
+// GET /veterinarios/para-turnos
+// Devuelve SOLO profesionales válidos para turnos
+// y devuelve el id REAL de public.veterinarios.id
+// ===================================================================
+const getVeterinariosParaTurnos = async (req, res) => {
+  const clinicaId = getClinicaId(req);
+  if (!clinicaId) return res.status(400).json({ error: 'Falta clinica_id en token/header' });
+
+  try {
+    const q = `
+      SELECT
+        v.id,
+        v.nombre,
+        v.especialidad,
+        v.telefono,
+        v.email,
+        v.rol,
+        v.clinica_id
+      FROM public.veterinarios v
+      WHERE v.clinica_id = $1
+        AND LOWER(COALESCE(v.rol, '')) IN ('veterinario', 'veterinaria')
+      ORDER BY v.nombre ASC
+    `;
+
+    const result = await pool.query(q, [clinicaId]);
+    return res.json(result.rows);
+  } catch (err) {
+    await registrarAuditoria(req, {
+      modulo: 'TURNOS',
+      accion: 'VER_ERROR',
+      entidad: 'veterinario',
+      entidad_id: `clinica:${clinicaId}`,
+      descripcion: 'Error obteniendo veterinarios para turnos',
+      metadata: { clinica_id: clinicaId, error: err.message },
+    });
+
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+// ===================================================================
+// POST /veterinarios
+// crea usuario + perfil veterinarios
 // ===================================================================
 const createVeterinario = async (req, res) => {
   const clinicaId = getClinicaId(req);
@@ -102,30 +153,33 @@ const createVeterinario = async (req, res) => {
   const email = normEmail(req.body?.email);
   const password = String(req.body?.password || '');
 
-  // rol_id dinámico
   const rol_id =
     req.body?.rol_id !== undefined && req.body?.rol_id !== null ? Number(req.body.rol_id) : null;
 
-  // fallback si manda rol texto
-  const rolTexto = String(req.body?.rol || '').trim().toLowerCase(); // opcional
+  const rolTexto = String(req.body?.rol || '').trim().toLowerCase();
 
   if (!clinicaId) return res.status(400).json({ error: 'Falta clinica_id en token/header' });
-  if (!nombre || !email || !password)
+  if (!nombre || !email || !password) {
     return res.status(400).json({ error: 'Nombre, email y password son obligatorios.' });
-  if (password.length < 8) return res.status(400).json({ error: 'Password mínimo 8 caracteres.' });
+  }
+  if (password.length < 8) {
+    return res.status(400).json({ error: 'Password mínimo 8 caracteres.' });
+  }
 
   const client = await pool.connect();
+
   try {
     await client.query('BEGIN');
 
-    // 1) validar email único (global)
-    const existsUser = await client.query(`SELECT id FROM public.users WHERE email = $1 LIMIT 1`, [email]);
+    const existsUser = await client.query(
+      `SELECT id FROM public.users WHERE email = $1 LIMIT 1`,
+      [email]
+    );
     if (existsUser.rowCount > 0) {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'Ese correo ya está registrado como usuario.' });
     }
 
-    // 2) resolver rol_id
     let finalRolId = rol_id;
     if (!finalRolId && rolTexto) {
       finalRolId = await getRolIdByNombre(rolTexto);
@@ -136,7 +190,6 @@ const createVeterinario = async (req, res) => {
       return res.status(400).json({ error: 'rol_id es obligatorio (o rol válido).' });
     }
 
-    // ✅ validar rol con clinica/global
     const vr = await validarRolAsignable(client, finalRolId, clinicaId);
     if (!vr.ok) {
       await client.query('ROLLBACK');
@@ -144,11 +197,8 @@ const createVeterinario = async (req, res) => {
     }
 
     const rolNombreLower = String(vr.rolNombre || '').toLowerCase();
-
-    // 3) hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // 4) insertar en users (fuente real)
     const userIns = await client.query(
       `INSERT INTO public.users (email, password, rol_id, clinica_id, nombre, apellido, telefono)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -156,10 +206,10 @@ const createVeterinario = async (req, res) => {
       [email, hashedPassword, finalRolId, clinicaId, nombre, apellido || '', telefono || '']
     );
 
-    // 5) insertar en veterinarios (perfil/compat)
-    await client.query(
+    const vetIns = await client.query(
       `INSERT INTO public.veterinarios (nombre, especialidad, telefono, email, password, rol, clinica_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, nombre, especialidad, telefono, email, rol, clinica_id`,
       [nombre, especialidad || null, telefono || null, email, hashedPassword, rolNombreLower, clinicaId]
     );
 
@@ -167,7 +217,8 @@ const createVeterinario = async (req, res) => {
 
     const creado = {
       ...userIns.rows[0],
-      especialidad: especialidad || null,
+      veterinario_id: vetIns.rows[0].id,
+      especialidad: vetIns.rows[0].especialidad,
       rol_nombre: vr.rol.nombre,
     };
 
@@ -203,7 +254,7 @@ const createVeterinario = async (req, res) => {
 };
 
 // ===================================================================
-// PUT /veterinarios/:id (edita usuario + rol dinámico)
+// PUT /veterinarios/:id
 // ===================================================================
 const updateVeterinario = async (req, res) => {
   const clinicaId = getClinicaId(req);
@@ -220,12 +271,12 @@ const updateVeterinario = async (req, res) => {
     req.body?.rol_id !== undefined && req.body?.rol_id !== null ? Number(req.body.rol_id) : null;
 
   const client = await pool.connect();
+
   try {
     if (!clinicaId) return res.status(400).json({ error: 'Falta clinica_id en token/header' });
 
     await client.query('BEGIN');
 
-    // traer user before
     const beforeUserRes = await client.query(
       `SELECT u.id, u.email, u.nombre, u.apellido, u.telefono, u.rol_id, r.nombre AS rol_nombre
        FROM public.users u
@@ -234,12 +285,12 @@ const updateVeterinario = async (req, res) => {
       [id, clinicaId]
     );
     const beforeUser = beforeUserRes.rows?.[0] || null;
+
     if (!beforeUser) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Usuario no encontrado o no autorizado' });
     }
 
-    // si cambia email, validar que no choque con otro usuario
     if (email && email !== beforeUser.email) {
       const check = await client.query(`SELECT id FROM public.users WHERE email = $1 LIMIT 1`, [email]);
       if (check.rowCount > 0) {
@@ -257,7 +308,6 @@ const updateVeterinario = async (req, res) => {
       newHashed = await bcrypt.hash(password, 10);
     }
 
-    // ✅ validar rol si viene
     let rolNombreFinal = beforeUser.rol_nombre;
     let rolIdFinal = null;
 
@@ -277,7 +327,6 @@ const updateVeterinario = async (req, res) => {
       rolNombreFinal = vr.rol.nombre;
     }
 
-    // 1) update users
     const updUser = await client.query(
       `UPDATE public.users
        SET nombre = COALESCE($1, nombre),
@@ -301,14 +350,12 @@ const updateVeterinario = async (req, res) => {
     );
 
     const afterUser = updUser.rows[0];
+    const rolLower = String(rolNombreFinal || '').toLowerCase();
 
-    // 2) update veterinarios (perfil) por email BEFORE
     const vetExist = await client.query(
       `SELECT id FROM public.veterinarios WHERE email = $1 AND clinica_id = $2 LIMIT 1`,
       [beforeUser.email, clinicaId]
     );
-
-    const rolLower = String(rolNombreFinal || '').toLowerCase();
 
     if (vetExist.rowCount === 0) {
       await client.query(
@@ -383,7 +430,7 @@ const updateVeterinario = async (req, res) => {
 };
 
 // ===================================================================
-// DELETE /veterinarios/:id  (borra en users + veterinarios)
+// DELETE /veterinarios/:id
 // ===================================================================
 const deleteVeterinario = async (req, res) => {
   const clinicaId = getClinicaId(req);
@@ -391,12 +438,12 @@ const deleteVeterinario = async (req, res) => {
 
   if (!clinicaId) return res.status(400).json({ error: 'Falta clinica_id en token/header' });
 
-  // seguridad: no te borres a ti mismo
   if (Number(req.user?.id) === Number(id)) {
     return res.status(400).json({ error: 'No puedes eliminar tu propio usuario.' });
   }
 
   const client = await pool.connect();
+
   try {
     await client.query('BEGIN');
 
@@ -408,6 +455,7 @@ const deleteVeterinario = async (req, res) => {
       [id, clinicaId]
     );
     const before = beforeRes.rows?.[0] || null;
+
     if (!before) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Usuario no encontrado o no autorizado' });
@@ -454,6 +502,7 @@ const deleteVeterinario = async (req, res) => {
 
 module.exports = {
   getVeterinarios,
+  getVeterinariosParaTurnos,
   createVeterinario,
   updateVeterinario,
   deleteVeterinario,

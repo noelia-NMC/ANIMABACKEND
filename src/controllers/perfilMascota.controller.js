@@ -11,17 +11,28 @@ const normalizeCollarId = (value) => {
 };
 
 const isValidCollarFormat = (collarId) => {
-  if (!collarId) return true; // opcional
+  if (!collarId) return true;
   return /^ANIMA-[A-Z0-9]{6}$/i.test(collarId);
 };
 
-// Verifica que el collar exista en la tabla WEB de mascotas
+// Busca collar en la tabla WEB mascotas y trae la clínica
 const getMascotaWebByCollar = async (collarId) => {
   const result = await pool.query(
     `
-      SELECT id, nombre, especie, raza, genero, collar_id, clinica_id, cliente_id
-      FROM public.mascotas
-      WHERE UPPER(collar_id) = UPPER($1)
+      SELECT 
+        m.id,
+        m.nombre,
+        m.especie,
+        m.raza,
+        m.genero,
+        m.collar_id,
+        m.clinica_id,
+        m.cliente_id,
+        c.nombre AS clinica_nombre,
+        c.direccion AS clinica_direccion
+      FROM public.mascotas m
+      LEFT JOIN public.clinicas c ON c.id = m.clinica_id
+      WHERE UPPER(m.collar_id) = UPPER($1)
       LIMIT 1
     `,
     [collarId]
@@ -29,7 +40,7 @@ const getMascotaWebByCollar = async (collarId) => {
   return result.rows[0] || null;
 };
 
-// Verifica que el collar no esté ya usado por otro perfil móvil
+// Busca perfil móvil por collar
 const getPerfilByCollar = async (collarId, perfilIdToIgnore = null) => {
   const result = await pool.query(
     `
@@ -42,6 +53,86 @@ const getPerfilByCollar = async (collarId, perfilIdToIgnore = null) => {
     [collarId, perfilIdToIgnore]
   );
   return result.rows[0] || null;
+};
+
+// Devuelve el contexto completo de clínica según la mascota móvil
+const buildPerfilClinicaContext = async ({ perfilId, propietarioId }) => {
+  const result = await pool.query(
+    `
+      SELECT
+        pm.id,
+        pm.nombre,
+        pm.especie,
+        pm.collar_id,
+        pm.propietario_id
+      FROM public.perfiles_mascotas pm
+      WHERE pm.id = $1 AND pm.propietario_id = $2
+      LIMIT 1
+    `,
+    [perfilId, propietarioId]
+  );
+
+  if (result.rows.length === 0) {
+    return { error: 'Mascota no encontrada o no te pertenece.', status: 404 };
+  }
+
+  const perfil = result.rows[0];
+  const collarId = normalizeCollarId(perfil.collar_id);
+
+  if (!collarId) {
+    return {
+      perfil_id: perfil.id,
+      mascota_nombre: perfil.nombre,
+      collar_id: null,
+      clinica: null,
+      puedeSolicitarTeleconsulta: false,
+      puedeUsarCollar: false,
+      mensaje:
+        'Tu mascota aún no tiene un collar ANIMA vinculado. Cuando lo tengas, podrás acceder a televeterinaria, monitoreo y funciones conectadas con tu clínica.',
+    };
+  }
+
+  const mascotaWeb = await getMascotaWebByCollar(collarId);
+
+  if (!mascotaWeb) {
+    return {
+      perfil_id: perfil.id,
+      mascota_nombre: perfil.nombre,
+      collar_id: collarId,
+      clinica: null,
+      puedeSolicitarTeleconsulta: false,
+      puedeUsarCollar: false,
+      mensaje:
+        'Tu collar ANIMA aún no está registrado correctamente en una clínica. Por favor comunícate con la clínica donde lo adquiriste.',
+    };
+  }
+
+  if (!mascotaWeb.clinica_id) {
+    return {
+      perfil_id: perfil.id,
+      mascota_nombre: perfil.nombre,
+      collar_id: collarId,
+      clinica: null,
+      puedeSolicitarTeleconsulta: false,
+      puedeUsarCollar: true,
+      mensaje:
+        'Tu collar existe, pero todavía no está asociado a una clínica. Pide ayuda en la clínica donde lo adquiriste.',
+    };
+  }
+
+  return {
+    perfil_id: perfil.id,
+    mascota_nombre: perfil.nombre,
+    collar_id: collarId,
+    clinica: {
+      id: mascotaWeb.clinica_id,
+      nombre: mascotaWeb.clinica_nombre || '',
+      direccion: mascotaWeb.clinica_direccion || '',
+    },
+    puedeSolicitarTeleconsulta: true,
+    puedeUsarCollar: true,
+    mensaje: `Tu mascota está vinculada a la clínica ${mascotaWeb.clinica_nombre || ''}.`,
+  };
 };
 
 // ==============================
@@ -65,6 +156,31 @@ const getMisPerfilesMascotas = async (req, res) => {
     return res.json(result.rows);
   } catch (error) {
     console.error('Error al obtener perfiles de mascotas:', error);
+    return res.status(500).json({ message: 'Error interno del servidor.' });
+  }
+};
+
+// ==============================
+// [GET] Contexto clínica por mascota móvil
+// ==============================
+const getContextoClinicaPorPerfil = async (req, res) => {
+  const propietarioId = req.user.id;
+  const perfilId = Number(req.params.id);
+
+  if (Number.isNaN(perfilId)) {
+    return res.status(400).json({ message: 'ID de mascota inválido.' });
+  }
+
+  try {
+    const data = await buildPerfilClinicaContext({ perfilId, propietarioId });
+
+    if (data.error) {
+      return res.status(data.status || 400).json({ message: data.error });
+    }
+
+    return res.json(data);
+  } catch (error) {
+    console.error('Error al obtener contexto de clínica:', error);
     return res.status(500).json({ message: 'Error interno del servidor.' });
   }
 };
@@ -109,7 +225,6 @@ const crearPerfilMascota = async (req, res) => {
         });
       }
 
-      // 1) Debe existir primero en la WEB
       const mascotaWeb = await getMascotaWebByCollar(collar_id);
       if (!mascotaWeb) {
         return res.status(404).json({
@@ -118,7 +233,6 @@ const crearPerfilMascota = async (req, res) => {
         });
       }
 
-      // 2) No debe estar vinculado ya a otro perfil móvil
       const perfilExistente = await getPerfilByCollar(collar_id);
       if (perfilExistente) {
         return res.status(409).json({
@@ -202,7 +316,6 @@ const actualizarPerfilMascota = async (req, res) => {
   collar_id = normalizeCollarId(collar_id);
 
   try {
-    // validar propiedad
     const petCheck = await pool.query(
       `
         SELECT id, collar_id
@@ -220,7 +333,6 @@ const actualizarPerfilMascota = async (req, res) => {
 
     let collarIdFinal = null;
 
-    // Solo perros pueden tener collar
     if (especie === 'canino') {
       if (collar_id) {
         if (!isValidCollarFormat(collar_id)) {
@@ -229,7 +341,6 @@ const actualizarPerfilMascota = async (req, res) => {
           });
         }
 
-        // Debe existir en mascotas web
         const mascotaWeb = await getMascotaWebByCollar(collar_id);
         if (!mascotaWeb) {
           return res.status(404).json({
@@ -238,7 +349,6 @@ const actualizarPerfilMascota = async (req, res) => {
           });
         }
 
-        // No debe estar en otro perfil móvil
         const perfilExistente = await getPerfilByCollar(collar_id, mascotaId);
         if (perfilExistente) {
           return res.status(409).json({
@@ -251,7 +361,6 @@ const actualizarPerfilMascota = async (req, res) => {
         collarIdFinal = null;
       }
     } else {
-      // si no es canino, siempre null
       collarIdFinal = null;
     }
 
@@ -334,7 +443,9 @@ const eliminarPerfilMascota = async (req, res) => {
 
 module.exports = {
   getMisPerfilesMascotas,
+  getContextoClinicaPorPerfil,
   crearPerfilMascota,
   actualizarPerfilMascota,
   eliminarPerfilMascota,
+  buildPerfilClinicaContext,
 };

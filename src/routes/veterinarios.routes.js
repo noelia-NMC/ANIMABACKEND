@@ -1,9 +1,10 @@
-// Backend/src/routes/veterinarios.routes.js      web
+// Backend/src/routes/veterinarios.routes.js
 const express = require('express');
 const router = express.Router();
 
 const {
   getVeterinarios,
+  getVeterinariosParaTurnos,
   createVeterinario,
   updateVeterinario,
   deleteVeterinario
@@ -14,9 +15,11 @@ const checkPermission = require('../middlewares/checkPermission');
 
 router.use(verifyToken);
 
-router.get('/',      checkPermission('veterinarios:read'),   getVeterinarios);
-router.post('/',     checkPermission('veterinarios:create'), createVeterinario);
-router.put('/:id',   checkPermission('veterinarios:update'), updateVeterinario);
-router.delete('/:id',checkPermission('veterinarios:delete'), deleteVeterinario);
+router.get('/para-turnos', checkPermission('turnos:read'), getVeterinariosParaTurnos);
+
+router.get('/', checkPermission('veterinarios:read'), getVeterinarios);
+router.post('/', checkPermission('veterinarios:create'), createVeterinario);
+router.put('/:id', checkPermission('veterinarios:update'), updateVeterinario);
+router.delete('/:id', checkPermission('veterinarios:delete'), deleteVeterinario);
 
 module.exports = router;

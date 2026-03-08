@@ -1,3 +1,5 @@
+
+//LOCAL
 /*const admin = require('firebase-admin');
 // Asegúrate de que la ruta al archivo JSON sea correcta
 const serviceAccount = require('../../firebase-service-account.json');
@@ -12,6 +14,8 @@ const db = admin.database();
 
 module.exports = { admin, db };*/
 
+
+//PRODUCCIÓN
 const admin = require('firebase-admin');
 
 function getFirebaseConfig() {
